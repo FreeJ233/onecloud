@@ -19,4 +19,4 @@
 
 #echo 'src-git xd https://github.com/shiyu1314/onecloud-package' >>feeds.conf.default
 
-svn co https://github.com/immortalwrt/immortalwrt/trunk/package/emortal package/emortal
+#svn co https://github.com/immortalwrt/immortalwrt/trunk/package/emortal package/emortal
