@@ -1,3 +1,4 @@
+
 #
 # Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
 #
@@ -8,7 +9,7 @@
 # Description: Build OpenWrt using GitHub Actions
 #
 
-name: immortalwrt
+name: Build OpenWrt
 
 on:
   repository_dispatch:
@@ -20,25 +21,23 @@ on:
         default: 'false'
 
 env:
-  #REPO_URL: https://github.com/shiyu1314/immortalwrt
-  #REPO_BRANCH: master
-  REPO_URL: https://github.com/FreeJ233/immortalwrt
+  REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
-  DIY_P1_SH: op1.sh
-  DIY_P2_SH: op2.sh
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_COWTRANSFER: false
   UPLOAD_WETRANSFER: false
-  UPLOAD_RELEASE: true
+  UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-20.04
-    
+
     steps:
     - name: Checkout
       uses: actions/checkout@main
@@ -84,6 +83,13 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
+    - name: SSH connection to Actions
+      uses: P3TERX/ssh2actions@v1.0.0
+      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+      env:
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
     - name: Download package
       id: package
       run: |
@@ -103,60 +109,6 @@ jobs:
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-        
-    - name: burn
-      run: |
-          sudo apt install img2simg
-          ver="v0.3.1"
-          curl -L -o ./AmlImg https://github.com/hzyitc/AmlImg/releases/download/$ver/AmlImg_${ver}_linux_amd64
-          chmod +x ./AmlImg
-          curl -L -o ./uboot.img https://github.com/shiyu1314/u-boot-onecloud/releases/download/build-20230901-0443/eMMC.burn.img
-          ./AmlImg unpack ./uboot.img burn/
-          echo "::endgroup::"
-          gunzip openwrt/bin/targets/*/*/*.gz
-          diskimg=$(ls openwrt/bin/targets/*/*/*.img)
-          loop=$(sudo losetup --find --show --partscan $diskimg)
-          img_ext="openwrt.img"
-          img_mnt="xd"
-          rootfs_mnt="img"
-          boot_img=$1${img_ext}
-          boot_img_mnt=$1${img_mnt}
-          rootfs_img_mnt=$1${rootfs_mnt}
-          echo ${boot_img}
-          echo ${boot_img_mnt}
-          echo ${rootfs_img_mnt}
-          sudo rm -rf ${boot_img}
-          sudo rm -rf ${boot_img_mnt}
-          sudo rm -rf ${rootfs_img_mnt}
-          sudo dd if=/dev/zero of=${boot_img} bs=1M count=400
-          sudo mkfs.ext4 ${boot_img}
-          sudo mkdir ${boot_img_mnt}
-          sudo mkdir ${rootfs_img_mnt}
-          sudo mount ${boot_img} ${boot_img_mnt}
-          sudo mount ${loop}p2 ${rootfs_img_mnt}
-          cd ${rootfs_img_mnt}
-          sudo cp -r * ../${boot_img_mnt}
-          cd ..
-          sudo sync
-          sudo umount ${boot_img_mnt}
-          sudo umount ${rootfs_img_mnt}
-          sudo img2simg ${loop}p1 burn/boot.simg
-          sudo img2simg openwrt.img burn/rootfs.simg
-          sudo rm -rf *.img
-          sudo losetup -d $loop
-          cat <<EOF >>burn/commands.txt
-          PARTITION:boot:sparse:boot.simg
-          PARTITION:rootfs:sparse:rootfs.simg
-          EOF
-          prefix=$(ls openwrt/bin/targets/*/*/*.img | sed 's/\.img$//')
-          burnimg=${prefix}.burn.img
-          ./AmlImg pack $burnimg burn/
-          for f in openwrt/bin/targets/*/*/*.burn.img; do
-            sha256sum "$f" >"${f}.sha"
-            xz --threads=0 --compress "$f"
-          done
-          sudo rm -rf openwrt/bin/targets/*/*/*.img
-          sudo rm -rf openwrt/bin/targets/*/*/*.gz
 
     - name: Check space usage
       if: (!cancelled())
@@ -185,6 +137,24 @@ jobs:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
+    - name: Upload firmware to cowtransfer
+      id: cowtransfer
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
+      run: |
+        curl -fsSL git.io/file-transfer | sh
+        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
+        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
+        echo "::set-output name=url::$(cat cowtransfer.log | grep https | cut -f3 -d" ")"
+
+    - name: Upload firmware to WeTransfer
+      id: wetransfer
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
+      run: |
+        curl -fsSL git.io/file-transfer | sh
+        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
+        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
+        echo "::set-output name=url::$(cat wetransfer.log | grep https | cut -f3 -d" ")"
+
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
@@ -204,7 +174,7 @@ jobs:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
-        
+
     - name: Delete workflow runs
       uses: GitRML/delete-workflow-runs@main
       with:
